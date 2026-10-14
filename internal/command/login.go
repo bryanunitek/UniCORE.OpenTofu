@@ -22,7 +22,6 @@ import (
 	"sync"
 
 	tfe "github.com/hashicorp/go-tfe"
-	"github.com/mitchellh/cli"
 	"github.com/opentofu/opentofu/internal/command/arguments"
 	"github.com/opentofu/opentofu/internal/command/views"
 	"github.com/opentofu/opentofu/internal/tracing"
@@ -46,6 +45,25 @@ import (
 // There are a few special circumstances that depend on this whitelisted hostname.
 const hcpTerraformHost = "app.terraform.io"
 
+func LoginCommander() Command {
+	cmd := Command{
+		Name:  "login",
+		Short: "Obtain and save credentials for a remote host",
+		Long: `Retrieves an authentication token for the given hostname, if it supports automatic login, and saves it in a credentials file in your home directory.
+
+If not overridden by credentials helper settings in the CLI configuration, the credentials will be written to the following local file:`,
+
+		DiagsWithNewline: true,
+	}
+
+	args := arguments.BindLogin(&cmd.CommandLine)
+	cmd.Run = func(meta Meta) int {
+		return LoginCommand{meta}.Execute(args, views.NewLogin(args.View, meta.View))
+	}
+
+	return cmd
+}
+
 // LoginCommand is a Command implementation that runs an interactive login
 // flow for a remote service host. It then stashes credentials in a tfrc
 // file in the user's home directory.
@@ -53,43 +71,15 @@ type LoginCommand struct {
 	Meta
 }
 
-// Run implements cli.Command.
 func (c *LoginCommand) Run(rawArgs []string) int {
+	return RunCommand(LoginCommander(), c.Meta, rawArgs)
+}
+func (c LoginCommand) Execute(args *arguments.Login, view views.Login) int {
+	var diags tfdiags.Diagnostics
+
 	ctx := c.CommandContext()
 	ctx, span := tracing.Tracer().Start(ctx, "Login")
 	defer span.End()
-
-	common, rawArgs := arguments.ParseView(rawArgs)
-	c.View.Configure(common)
-	// Because the legacy UI was using println to show diagnostics and the new view is using, by default, print,
-	// in order to keep functional parity, we setup the view to add a new line after each diagnostic.
-	c.View.DiagsWithNewline()
-
-	// Parse and validate flags
-	args, closer, diags := arguments.ParseLogin(rawArgs)
-	defer closer()
-
-	// Instantiate the view, even if there are flag errors, so that we render
-	// diagnostics according to the desired view
-	view := views.NewLogin(args.ViewOptions, c.View)
-	if diags.HasErrors() {
-		view.Diagnostics(diags)
-		if args.ViewOptions.ViewType == arguments.ViewJSON {
-			return 1
-		}
-		return cli.RunResultHelp
-	}
-
-	// FIXME: the -input flag value is needed to initialize the backend and the
-	// operation, but there is no clear path to pass this value down, so we
-	// continue to mutate the Meta object state for now.
-	c.Meta.input = args.ViewOptions.InputEnabled
-
-	// TODO meta-refactor: when the stateLock and stateLockTimeout are extracted to be configured separately, remove
-	// these and use a common way to configure this
-	// The stateLock=true is here this way because this command used before meta.extendedFlagSet which did the same
-	// and left for the command to configure flags for this if needed.
-	c.Meta.stateLock = true
 
 	if !c.input {
 		diags = diags.Append(tfdiags.Sourceless(
@@ -360,10 +350,10 @@ func (c *LoginCommand) Synopsis() string {
 }
 
 func (c *LoginCommand) defaultOutputFile() string {
-	if c.CLIConfigDir == "" {
+	if c.SystemCfg.CLIConfigDir == "" {
 		return "" // no default available
 	}
-	return filepath.Join(c.CLIConfigDir, "credentials.tfrc.json")
+	return filepath.Join(c.SystemCfg.CLIConfigDir, "credentials.tfrc.json")
 }
 
 func (c *LoginCommand) interactiveGetTokenByCode(ctx context.Context, hostname svchost.Hostname, credsCtx *loginCredentialsContext, clientConfig *disco.OAuthClient, view views.Login) (*oauth2.Token, tfdiags.Diagnostics) {
@@ -522,9 +512,9 @@ func (c *LoginCommand) interactiveGetTokenByCode(ctx context.Context, hostname s
 				"Current command was aborted by the calling code.",
 			),
 		)
-    if err := server.Shutdown(ctx); err != nil {
-		log.Printf("[WARN] login: callback server shutdown failed: %s", err)
-	}
+		if err := server.Shutdown(ctx); err != nil {
+			log.Printf("[WARN] login: callback server shutdown failed: %s", err)
+		}
 		wg.Wait()
 		close(codeCh)
 		return nil, diags
